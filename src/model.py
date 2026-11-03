@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
 from sklearn.model_selection import train_test_split
+from scipy.optimize import minimize
+from scipy.special import softmax
 from xgboost import XGBClassifier
 
 from src.validation import CVResult
@@ -227,3 +229,63 @@ def get_feature_importance_df(models: List[XGBClassifier], feature_names: List[s
         .sort_values("importance", ascending=False)
         .reset_index(drop=True)
     )
+
+
+def optimize_ensemble_weights(
+    y_true: np.ndarray,
+    oof_predictions: Sequence[np.ndarray] | np.ndarray,
+    init_weights: Optional[Sequence[float] | np.ndarray] = None,
+    metric: str = "logloss",
+    threshold: float = 0.5,
+) -> np.ndarray:
+    """Find mathematically optimal ensemble weights (w_1, ..., w_M) using `scipy.optimize.minimize`.
+
+    Uses an unconstrained Softmax transformation `w_i = exp(theta_i) / sum(exp(theta_j))`
+    to strictly guarantee the probability simplex constraint (w_i >= 0, sum(w_i) == 1)
+    without artificial boundary clipping.
+
+    Parameters:
+        y_true: Ground truth binary labels (0 or 1).
+        oof_predictions: List or 2D array of shape (N, M) containing out-of-fold predicted probabilities.
+        init_weights: Optional initial weights (e.g. from config). If None, starts with equal weights.
+        metric: Optimization target: "logloss" (smooth, recommended for generalization) or "accuracy".
+        threshold: Decision threshold for accuracy evaluation.
+
+    Returns:
+        np.ndarray: Optimal normalized weights summing to 1.0.
+    """
+    P = np.column_stack(oof_predictions) if isinstance(oof_predictions, list) else np.asarray(oof_predictions)
+    n_models = P.shape[1]
+
+    if init_weights is not None:
+        w_init = np.asarray(init_weights, dtype=float)
+        w_init = np.clip(w_init / np.sum(w_init), 1e-6, 1.0)
+        theta0 = np.log(w_init)
+    else:
+        theta0 = np.zeros(n_models)
+
+    if metric == "logloss":
+        def objective(theta: np.ndarray) -> float:
+            w = softmax(theta)
+            p = np.clip(np.dot(P, w), 1e-15, 1.0 - 1e-15)
+            return float(log_loss(y_true, p))
+    elif metric == "accuracy":
+        def objective(theta: np.ndarray) -> float:
+            w = softmax(theta)
+            p = np.dot(P, w)
+            acc = float(accuracy_score(y_true, (p >= threshold).astype(int)))
+            p_clip = np.clip(p, 1e-15, 1.0 - 1e-15)
+            # Use small logloss penalty as continuous tie-breaker on identical accuracy plateaus
+            return -acc + 1e-4 * float(log_loss(y_true, p_clip))
+    else:
+        raise ValueError(f"Unsupported metric '{metric}'. Choose 'logloss' or 'accuracy'.")
+
+    res = minimize(
+        fun=objective,
+        x0=theta0,
+        method="Nelder-Mead",
+        options={"maxiter": 1000, "disp": False},
+    )
+    opt_w = softmax(res.x)
+    return opt_w / np.sum(opt_w)
+

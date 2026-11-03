@@ -29,7 +29,7 @@ from src.feature_engineering import (
     WithinFoldTargetEncoder,
     build_feature_dataframe,
 )
-from src.model import get_feature_importance_df, run_xgb_cv
+from src.model import get_feature_importance_df, optimize_ensemble_weights, run_xgb_cv
 from src.submission import generate_submission, validate_submission_df
 from src.validation import get_cv_splits
 
@@ -161,3 +161,26 @@ def test_model_cv_and_submission_formatting(sample_data, tmp_path):
     info = validate_submission_df(sub_df, sample_sub)
     assert info["valid"] is True
     assert info["n_rows"] == len(sample_sub)
+
+
+def test_optimize_ensemble_weights():
+    np.random.seed(42)
+    y_true = np.array([1, 1, 0, 0, 1, 0, 1, 0, 1, 1])
+    # 3 mock model prediction columns
+    p1 = np.array([0.9, 0.8, 0.1, 0.2, 0.7, 0.3, 0.8, 0.2, 0.9, 0.6])
+    p2 = np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5])
+    p3 = np.array([0.8, 0.7, 0.2, 0.3, 0.6, 0.4, 0.7, 0.1, 0.8, 0.7])
+    P = np.column_stack([p1, p2, p3])
+
+    opt_w = optimize_ensemble_weights(y_true, P, init_weights=[0.33, 0.33, 0.33], metric="logloss")
+    assert len(opt_w) == 3
+    assert np.isclose(np.sum(opt_w), 1.0)
+    assert all(w >= 0.0 for w in opt_w)
+    # The informative models (p1, p3) should receive much higher weight than the random guesser p2
+    assert opt_w[0] > opt_w[1] and opt_w[2] > opt_w[1]
+
+    # Test accuracy metric
+    opt_w_acc = optimize_ensemble_weights(y_true, P, metric="accuracy")
+    assert len(opt_w_acc) == 3
+    assert np.isclose(np.sum(opt_w_acc), 1.0)
+
