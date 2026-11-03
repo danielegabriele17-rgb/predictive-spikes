@@ -1,9 +1,8 @@
 """XGBoost model training, native C++ Booster feature importance, and 5-fold CV inference."""
-
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd

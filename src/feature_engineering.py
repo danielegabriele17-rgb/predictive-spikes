@@ -258,3 +258,35 @@ class WithinFoldTargetEncoder:
 
         self.fit(train_battles, y_train)
         return pd.DataFrame(oof_rows)
+
+
+def get_default_feature_subsets(
+    config_path: Optional[str | Path] = None,
+) -> Dict[str, List[str]]:
+    """Return the curated feature subsets for the diverse 4-model ensemble.
+
+    Loads the feature lists (pruned, top200, top220, top140) from `configs/experiments.yaml`
+    if present, or looks for it relative to repository root / current working directory.
+    """
+    from pathlib import Path
+    import yaml
+
+    candidates: List[Path] = []
+    if config_path is not None:
+        candidates.append(Path(config_path))
+    repo_root = Path(__file__).resolve().parent.parent
+    candidates.append(repo_root / "configs" / "experiments.yaml")
+    candidates.append(Path.cwd() / "configs" / "experiments.yaml")
+
+    for cand in candidates:
+        if cand.exists():
+            with open(cand, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f)
+                if "feature_subsets" in cfg:
+                    return cfg["feature_subsets"]
+
+    raise FileNotFoundError(
+        "Could not locate feature subsets configuration in experiments.yaml. "
+        "Please provide an explicit config_path or ensure configs/experiments.yaml is present."
+    )
+
