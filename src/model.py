@@ -1,4 +1,15 @@
-"""XGBoost model training, cross-validation, and inference utilities."""
+"""XGBoost model training, native C++ Booster utilities, cross-validation, and TreeSHAP inference.
+
+This module combines both the scikit-learn wrapper (`xgb.XGBClassifier`) and XGBoost's
+native C++ API (`xgb.DMatrix`, `xgb.cv`, `Booster.get_score`, `Booster.predict(pred_contribs=True)`,
+and `xgb.plot_importance`) to provide:
+1. Stratified 5-Fold Cross-Validation with leak-free within-fold feature injection (`run_xgb_cv`).
+2. Native C++ cross-validation history and optimal round discovery (`run_xgb_native_cv`).
+3. Multi-metric structural tree feature importance (`gain`, `total_gain`, `weight`, `cover`)
+   via `Booster.get_score` (`get_feature_importance_df`).
+4. Exact native C++ TreeSHAP feature attributions via `pred_contribs=True` (`compute_xgb_shap_df`).
+5. Native model-based feature pruning via `SelectFromModel` (`xgb_select_features`).
+"""
 
 from __future__ import annotations
 
@@ -7,12 +18,14 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import xgboost as xgb
 from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
 from xgboost import XGBClassifier
 
 from src.validation import CVResult
 
 
+# Default histogram-based Gradient Boosted Decision Tree hyperparameters
 DEFAULT_XGB_PARAMS: Dict[str, Any] = {
     "objective": "binary:logistic",
     "eval_metric": "logloss",
@@ -30,12 +43,24 @@ DEFAULT_XGB_PARAMS: Dict[str, Any] = {
 }
 
 
+def build_dmatrix(
+    X_df: pd.DataFrame,
+    y: Optional[np.ndarray] = None,
+) -> xgb.DMatrix:
+    """Construct a native C++ `xgb.DMatrix` preserving column names for Booster inspection."""
+    return xgb.DMatrix(
+        data=X_df,
+        label=y,
+        feature_names=list(X_df.columns),
+    )
+
+
 def build_xgb_model(
     params: Optional[Dict[str, Any]] = None,
     seed: int = 42,
     early_stopping_rounds: Optional[int] = None,
 ) -> XGBClassifier:
-    """Instantiate an XGBClassifier with competition-compliant defaults."""
+    """Instantiate an `XGBClassifier` with competition-compliant defaults."""
     cfg = dict(DEFAULT_XGB_PARAMS)
     if params:
         cfg.update(params)
@@ -45,6 +70,40 @@ def build_xgb_model(
     else:
         cfg.pop("early_stopping_rounds", None)
     return XGBClassifier(**cfg)
+
+
+def run_xgb_native_cv(
+    X_df: pd.DataFrame,
+    y: np.ndarray,
+    splits: List[Tuple[np.ndarray, np.ndarray]],
+    xgb_params: Optional[Dict[str, Any]] = None,
+    early_stopping_rounds: int = 50,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """Run XGBoost's native C++ `xgb.cv()` engine across custom stratified folds.
+
+    Evaluates `logloss`, `auc`, and classification `error` (`1 - accuracy`) simultaneously
+    in C++ across all folds and truncates the history at the optimal boosting round.
+    """
+    cfg = dict(DEFAULT_XGB_PARAMS)
+    if xgb_params:
+        cfg.update(xgb_params)
+    num_boost_round = int(cfg.pop("n_estimators", 300))
+    cfg.pop("early_stopping_rounds", None)
+    cfg["seed"] = seed
+
+    dtrain = build_dmatrix(X_df, y)
+    cv_history = xgb.cv(
+        params=cfg,
+        dtrain=dtrain,
+        num_boost_round=num_boost_round,
+        folds=splits,
+        metrics=["logloss", "auc", "error"],
+        early_stopping_rounds=early_stopping_rounds,
+        seed=seed,
+        verbose_eval=False,
+    )
+    return cv_history
 
 
 def run_xgb_cv(
@@ -66,8 +125,8 @@ def run_xgb_cv(
 ) -> Tuple[CVResult, Optional[np.ndarray]]:
     """Run stratified cross-validation with XGBoost and optional within-fold feature extraction.
 
-    Any fold-dependent statistics (e.g., target encoding or within-fold catalogues)
-    can be appended via `fold_feature_fn(tr_idx, va_idx)` so zero leakage occurs.
+    Any fold-dependent statistics (e.g., `WithinFoldTargetEncoder`) are appended strictly inside
+    each fold via `fold_feature_fn(tr_idx, va_idx)` so zero target leakage occurs.
     """
     t0 = time.perf_counter()
     n_samples = len(y)
@@ -85,6 +144,7 @@ def run_xgb_cv(
         y_tr = y[tr_idx]
         y_va = y[va_idx]
 
+        # Append strictly within-fold encoded features if provided
         if fold_feature_fn is not None:
             extra_tr, extra_va = fold_feature_fn(tr_idx, va_idx)
             X_tr = pd.concat([X_tr.reset_index(drop=True), extra_tr.reset_index(drop=True)], axis=1)
@@ -154,17 +214,85 @@ def run_xgb_cv(
 
 
 def get_feature_importance_df(models: List[XGBClassifier], feature_names: List[str]) -> pd.DataFrame:
-    """Compute mean gain feature importance across CV fold models using vectorized NumPy averaging."""
-    imps = (
-        np.mean([m.feature_importances_ for m in models], axis=0)
-        if models
-        else np.zeros(len(feature_names), dtype=float)
-    )
+    """Extract multi-metric native XGBoost feature importances across CV fold Boosters.
+
+    Queries `model.get_booster().get_score(importance_type=...)` for each fold model to compute:
+    - `importance`: Normalized average gain (`feature_importances_`).
+    - `gain`: Native average loss reduction per split (`get_score(importance_type="gain")`).
+    - `total_gain`: Total loss reduction across all splits (`get_score(importance_type="total_gain")`).
+    - `weight`: Number of times the feature is used to split a node (`get_score(importance_type="weight")`).
+    - `cover`: Average number of battles covered by splits on the feature (`get_score(importance_type="cover")`).
+    """
+    n_feats = len(feature_names)
+    if not models:
+        return pd.DataFrame(
+            {
+                "feature": feature_names,
+                "importance": np.zeros(n_feats),
+                "gain": np.zeros(n_feats),
+                "total_gain": np.zeros(n_feats),
+                "weight": np.zeros(n_feats),
+                "cover": np.zeros(n_feats),
+            }
+        )
+
+    # Normalized gain from scikit-learn wrapper
+    norm_gain = np.mean([m.feature_importances_ for m in models], axis=0)
+
+    # Native C++ Booster structural metrics via `get_booster().get_score()`
+    metric_Accumulator: Dict[str, np.ndarray] = {
+        m_type: np.zeros(n_feats, dtype=float)
+        for m_type in ("gain", "total_gain", "weight", "cover")
+    }
+    feat_idx_map = {fname: idx for idx, fname in enumerate(feature_names)}
+
+    for m in models:
+        booster = m.get_booster()
+        for m_type, arr in metric_Accumulator.items():
+            scores = booster.get_score(importance_type=m_type)
+            for k, val in scores.items():
+                idx = feat_idx_map.get(k)
+                if idx is None and k.startswith("f") and k[1:].isdigit():
+                    f_i = int(k[1:])
+                    if 0 <= f_i < n_feats:
+                        idx = f_i
+                if idx is not None:
+                    arr[idx] += float(val)
+
+    n_models = float(len(models))
     return (
-        pd.DataFrame({"feature": feature_names, "importance": imps})
+        pd.DataFrame(
+            {
+                "feature": feature_names,
+                "importance": norm_gain,
+                "gain": metric_Accumulator["gain"] / n_models,
+                "total_gain": metric_Accumulator["total_gain"] / n_models,
+                "weight": metric_Accumulator["weight"] / n_models,
+                "cover": metric_Accumulator["cover"] / n_models,
+            }
+        )
         .sort_values("importance", ascending=False)
         .reset_index(drop=True)
     )
+
+
+def compute_xgb_shap_df(
+    models: List[XGBClassifier],
+    X_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Compute exact native C++ TreeSHAP values using `Booster.predict(..., pred_contribs=True)`.
+
+    Returns a DataFrame of shape `(n_samples, n_features + 1)` where each column contains
+    the average log-odds contribution of that feature to `player_won == 1` across the CV fold
+    boosters, and the final column `'bias'` is the expected base margin.
+    """
+    feature_names = list(X_df.columns)
+    dmat = build_dmatrix(X_df)
+    contribs = np.mean(
+        [m.get_booster().predict(dmat, pred_contribs=True) for m in models],
+        axis=0,
+    )
+    return pd.DataFrame(contribs, columns=feature_names + ["bias"], index=X_df.index)
 
 
 def xgb_select_features(
@@ -186,8 +314,6 @@ def xgb_select_features(
     selector.fit(X_df, y)
     selected_mask = selector.get_support()
     selected_cols = list(X_df.columns[selected_mask])
-    # Order selected columns by native XGBoost gain importance descending
     importances = selector.estimator_.feature_importances_[selected_mask]
     order = np.argsort(-importances)
     return [selected_cols[i] for i in order]
-

@@ -31,7 +31,14 @@ from src.feature_engineering import (
     WithinFoldTargetEncoder,
     build_feature_dataframe,
 )
-from src.model import build_xgb_model, run_xgb_cv, xgb_select_features
+from src.model import (
+    build_xgb_model,
+    compute_xgb_shap_df,
+    get_feature_importance_df,
+    run_xgb_cv,
+    run_xgb_native_cv,
+    xgb_select_features,
+)
 from src.submission import generate_submission, validate_submission_df
 from src.validation import compute_battle_groups, get_cv_splits
 
@@ -168,14 +175,31 @@ def test_model_cv_and_submission_formatting(sample_data, tmp_path):
 
 
 def test_xgb_native_feature_selection(sample_data):
-    train_small, _, _, type_chart, catalogue = sample_data
+    train_small, test_small, _, type_chart, catalogue = sample_data
     X_tr, _, y_tr = build_feature_dataframe(train_small, families=ALL_FEATURE_FAMILIES, catalogue=catalogue, type_chart=type_chart)
+    X_te, _, _ = build_feature_dataframe(test_small, families=ALL_FEATURE_FAMILIES, catalogue=catalogue, type_chart=type_chart)
+    fast_params = {"n_estimators": 20, "max_depth": 3, "n_jobs": 2}
+
     selected = xgb_select_features(
         X_tr,
         y_tr,
         max_features=40,
-        xgb_params={"n_estimators": 20, "max_depth": 3, "n_jobs": 2},
+        xgb_params=fast_params,
     )
     assert len(selected) == 40
     assert all(col in X_tr.columns for col in selected)
+
+    # Test native C++ xgb.cv(), multi-metric Booster.get_score(), and native TreeSHAP pred_contribs
+    splits = get_cv_splits(train_small, y_tr, n_splits=3, seed=42)
+    cv_hist = run_xgb_native_cv(X_tr[selected], y_tr, splits, xgb_params=fast_params, early_stopping_rounds=5)
+    assert "test-logloss-mean" in cv_hist.columns
+    assert "test-auc-mean" in cv_hist.columns
+
+    cv_res, _ = run_xgb_cv(X_tr[selected], y_tr, splits, xgb_params=fast_params, early_stopping_rounds=5)
+    fi_df = get_feature_importance_df(cv_res.models, cv_res.feature_names)
+    assert {"feature", "importance", "gain", "total_gain", "weight", "cover"}.issubset(set(fi_df.columns))
+
+    shap_df = compute_xgb_shap_df(cv_res.models, X_te[selected])
+    assert shap_df.shape == (len(X_te), len(selected) + 1)
+    assert "bias" in shap_df.columns
 
