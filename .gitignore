@@ -225,6 +225,7 @@ __marimo__/
 # Competition dataset and local outputs (NEVER commit to GitHub)
 fds-pokemon-battles-prediction-2026/
 outputs/
+submission.csv
 *.zip
 kaggle.json
 .env
