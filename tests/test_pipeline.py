@@ -1,4 +1,4 @@
-"""Comprehensive automated test suite for the Pokémon Battle Prediction pipeline."""
+"""Automated verification test suite for the Pokémon Battle Prediction submission pipeline."""
 
 from __future__ import annotations
 
@@ -16,11 +16,9 @@ if str(ROOT) not in sys.path:
 
 from src.battle_features import (
     build_species_catalogue,
-    extract_organizer_features,
     reconstruct_battle_history,
 )
 from src.data_loader import (
-    discover_data_dir,
     get_data_paths,
     get_type_effectiveness,
     load_jsonl,
@@ -31,16 +29,9 @@ from src.feature_engineering import (
     WithinFoldTargetEncoder,
     build_feature_dataframe,
 )
-from src.model import (
-    build_xgb_model,
-    compute_xgb_shap_df,
-    get_feature_importance_df,
-    run_xgb_cv,
-    run_xgb_native_cv,
-    xgb_select_features,
-)
+from src.model import get_feature_importance_df, run_xgb_cv
 from src.submission import generate_submission, validate_submission_df
-from src.validation import compute_battle_groups, get_cv_splits
+from src.validation import get_cv_splits
 
 
 @pytest.fixture(scope="module")
@@ -77,10 +68,6 @@ def test_duplicate_cached_move_not_double_counted(sample_data):
     train_small, _, _, type_chart, catalogue = sample_data
     battle = copy.deepcopy(train_small[0])
 
-    # Construct a controlled 3-turn timeline:
-    # Turn 1: P1 tyranitar uses earthquake (executed = 1)
-    # Turn 2: P1 switches to golem with move_details=None (executed = 0)
-    # Turn 3: P1 switches back to tyranitar; parser carries cached move_details=earthquake (executed = 0!)
     tl = battle["battle_timeline"][:3]
     tl[0]["p1_pokemon_state"] = {"name": "tyranitar", "hp_pct": 1.0, "status": "nostatus", "effects": ["noeffect"], "boosts": {}}
     tl[0]["p1_move_details"] = {"name": "earthquake", "type": "ground", "category": "physical", "base_power": 100, "accuracy": 1.0, "priority": 0}
@@ -102,14 +89,13 @@ def test_duplicate_cached_move_not_double_counted(sample_data):
 def test_missing_values_and_observation_boundaries(sample_data):
     train_small, _, _, type_chart, catalogue = sample_data
     b_missing = copy.deepcopy(train_small[0])
-    # Simulate missing optional attributes and shorter timeline
     b_missing["p2_lead_details"] = {"name": "unseenmon"}
     b_missing["battle_timeline"] = b_missing["battle_timeline"][:12]
     for e in b_missing["battle_timeline"]:
         e["p1_move_details"] = None
         e["p2_move_details"] = None
 
-    X_df, bids, y = build_feature_dataframe([b_missing], families=ALL_FEATURE_FAMILIES, catalogue=catalogue, type_chart=type_chart)
+    X_df, _, _ = build_feature_dataframe([b_missing], families=ALL_FEATURE_FAMILIES, catalogue=catalogue, type_chart=type_chart)
     assert X_df.shape[0] == 1
     assert not X_df.isna().any().any()
     assert not np.isinf(X_df.to_numpy()).any()
@@ -117,8 +103,8 @@ def test_missing_values_and_observation_boundaries(sample_data):
 
 def test_train_test_feature_consistency_and_no_target_leakage(sample_data):
     train_small, test_small, _, type_chart, catalogue = sample_data
-    X_tr, tr_ids, y_tr = build_feature_dataframe(train_small, families=ALL_FEATURE_FAMILIES, catalogue=catalogue, type_chart=type_chart)
-    X_te, te_ids, y_te = build_feature_dataframe(test_small, families=ALL_FEATURE_FAMILIES, catalogue=catalogue, type_chart=type_chart)
+    X_tr, _, y_tr = build_feature_dataframe(train_small, families=ALL_FEATURE_FAMILIES, catalogue=catalogue, type_chart=type_chart)
+    X_te, _, y_te = build_feature_dataframe(test_small, families=ALL_FEATURE_FAMILIES, catalogue=catalogue, type_chart=type_chart)
 
     assert y_tr is not None and len(y_tr) == len(train_small)
     assert y_te is None
@@ -135,7 +121,7 @@ def test_train_test_feature_consistency_and_no_target_leakage(sample_data):
 
 
 def test_within_fold_target_encoder_no_leakage(sample_data):
-    train_small, test_small, _, _, _ = sample_data
+    train_small, _, _, _, _ = sample_data
     y = np.array([int(b["player_won"]) for b in train_small], dtype=int)
     enc = WithinFoldTargetEncoder(smoothing=20.0, team_smoothing=15.0)
     tr_oof = enc.fit_transform_inner_oof(train_small[:40], y[:40], n_inner_splits=4, seed=42)
@@ -151,7 +137,7 @@ def test_model_cv_and_submission_formatting(sample_data, tmp_path):
     X_tr, _, y_tr = build_feature_dataframe(train_small, families=["team", "state"], catalogue=catalogue, type_chart=type_chart)
     X_te, te_ids, _ = build_feature_dataframe(test_small, families=["team", "state"], catalogue=catalogue, type_chart=type_chart)
 
-    splits = get_cv_splits(train_small, y_tr, n_splits=3, seed=42, group_duplicates=True)
+    splits = get_cv_splits(train_small, y_tr, n_splits=3, seed=42)
     fast_params = {"n_estimators": 20, "max_depth": 3, "learning_rate": 0.1, "n_jobs": 2}
     cv_res, test_probs = run_xgb_cv(
         X_df=X_tr,
@@ -165,6 +151,9 @@ def test_model_cv_and_submission_formatting(sample_data, tmp_path):
     assert 0.0 <= cv_res.cv_mean_acc <= 1.0
     assert test_probs is not None and len(test_probs) == len(test_small)
 
+    fi_df = get_feature_importance_df(cv_res.models, cv_res.feature_names)
+    assert {"feature", "importance", "gain", "total_gain", "weight", "cover"}.issubset(set(fi_df.columns))
+
     test_preds = (test_probs >= 0.5).astype(int)
     out_csv = tmp_path / "test_sub.csv"
     sub_df = generate_submission(te_ids, test_preds, sample_sub, output_path=out_csv)
@@ -172,34 +161,3 @@ def test_model_cv_and_submission_formatting(sample_data, tmp_path):
     info = validate_submission_df(sub_df, sample_sub)
     assert info["valid"] is True
     assert info["n_rows"] == len(sample_sub)
-
-
-def test_xgb_native_feature_selection(sample_data):
-    train_small, test_small, _, type_chart, catalogue = sample_data
-    X_tr, _, y_tr = build_feature_dataframe(train_small, families=ALL_FEATURE_FAMILIES, catalogue=catalogue, type_chart=type_chart)
-    X_te, _, _ = build_feature_dataframe(test_small, families=ALL_FEATURE_FAMILIES, catalogue=catalogue, type_chart=type_chart)
-    fast_params = {"n_estimators": 20, "max_depth": 3, "n_jobs": 2}
-
-    selected = xgb_select_features(
-        X_tr,
-        y_tr,
-        max_features=40,
-        xgb_params=fast_params,
-    )
-    assert len(selected) == 40
-    assert all(col in X_tr.columns for col in selected)
-
-    # Test native C++ xgb.cv(), multi-metric Booster.get_score(), and native TreeSHAP pred_contribs
-    splits = get_cv_splits(train_small, y_tr, n_splits=3, seed=42)
-    cv_hist = run_xgb_native_cv(X_tr[selected], y_tr, splits, xgb_params=fast_params, early_stopping_rounds=5)
-    assert "test-logloss-mean" in cv_hist.columns
-    assert "test-auc-mean" in cv_hist.columns
-
-    cv_res, _ = run_xgb_cv(X_tr[selected], y_tr, splits, xgb_params=fast_params, early_stopping_rounds=5)
-    fi_df = get_feature_importance_df(cv_res.models, cv_res.feature_names)
-    assert {"feature", "importance", "gain", "total_gain", "weight", "cover"}.issubset(set(fi_df.columns))
-
-    shap_df = compute_xgb_shap_df(cv_res.models, X_te[selected])
-    assert shap_df.shape == (len(X_te), len(selected) + 1)
-    assert "bias" in shap_df.columns
-

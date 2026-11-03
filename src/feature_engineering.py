@@ -12,9 +12,7 @@ from src.battle_features import (
     build_species_catalogue,
     extract_interaction_features,
     extract_matchup_features,
-    extract_organizer_features,
     extract_p2_observed_features,
-    extract_simple_state_features,
     extract_state_features,
     extract_team_features,
     extract_temporal_features,
@@ -42,15 +40,8 @@ def extract_battle_features_single(
     fam_set = set(families)
     feats: Dict[str, float] = {}
 
-    if "organizer" in fam_set:
-        feats.update(extract_organizer_features(battle))
-        return feats
-
     if "team" in fam_set:
         feats.update(extract_team_features(battle))
-
-    if "simple_state" in fam_set:
-        feats.update(extract_simple_state_features(battle))
 
     needs_recon = bool(fam_set & {"p2_observed", "state", "temporal", "matchup", "interactions"})
     if needs_recon:
@@ -143,11 +134,6 @@ class WithinFoldTargetEncoder:
 
         p1_alive = [n for n, h in p1_hp.items() if h > 0.0]
         p2_alive = [n for n, h in p2_hp.items() if h > 0.0]
-        p1_sig = tuple(sorted(p1_names))
-        p2_sig = tuple(sorted(p2_hp.keys()))
-        tl = battle.get("battle_timeline", [])
-        act_p1 = tl[-1]["p1_pokemon_state"]["name"] if tl else ""
-        act_p2 = tl[-1]["p2_pokemon_state"]["name"] if tl else ""
         return {
             "p1_names": p1_names,
             "p2_names": list(p2_hp.keys()),
@@ -155,10 +141,8 @@ class WithinFoldTargetEncoder:
             "p2_alive": p2_alive,
             "p1_hp": p1_hp,
             "p2_hp": p2_hp,
-            "p1_sig": p1_sig,
-            "p2_sig": p2_sig,
-            "act_p1": act_p1,
-            "act_p2": act_p2,
+            "p1_sig": tuple(sorted(p1_names)),
+            "p2_sig": tuple(sorted(p2_hp.keys())),
         }
 
     def fit(self, train_battles: Sequence[Dict[str, Any]], y_train: np.ndarray) -> "WithinFoldTargetEncoder":
