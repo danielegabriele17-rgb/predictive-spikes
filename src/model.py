@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
+from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
 
 from src.validation import CVResult
@@ -64,11 +65,15 @@ def run_xgb_cv(
     ] = None,
     threshold: float = 0.5,
     seed: int = 42,
+    es_holdout_frac: float = 0.2,
 ) -> Tuple[CVResult, Optional[np.ndarray]]:
     """Run stratified cross-validation with XGBoost and optional within-fold feature extraction.
 
     Any fold-dependent statistics (e.g., `WithinFoldTargetEncoder`) are appended strictly inside
     each fold via `fold_feature_fn(tr_idx, va_idx)` so zero target leakage occurs.
+
+    Early stopping uses an inner stratified hold-out (`es_holdout_frac` of the training fold),
+    keeping the validation fold untouched so the reported CV accuracy is an unbiased estimate.
     """
     t0 = time.perf_counter()
     n_samples = len(y)
@@ -101,10 +106,19 @@ def run_xgb_cv(
         )
 
         if early_stopping_rounds is not None:
-            model.fit(
+            # Early stopping is decided on an inner stratified hold-out carved from the TRAINING fold,
+            # so the validation fold (X_va) is never seen before computing the reported accuracy.
+            X_fit, X_es, y_fit, y_es = train_test_split(
                 X_tr,
                 y_tr,
-                eval_set=[(X_va, y_va)],
+                test_size=es_holdout_frac,
+                stratify=y_tr,
+                random_state=seed + fold_idx,
+            )
+            model.fit(
+                X_fit,
+                y_fit,
+                eval_set=[(X_es, y_es)],
                 verbose=False,
             )
         else:
