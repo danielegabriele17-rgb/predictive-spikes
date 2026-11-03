@@ -130,15 +130,23 @@ def reproduce_submission(
     P_oof = np.column_stack([oof_map[m] for m in members])
     P_test = np.column_stack([test_map[m] for m in members])
 
-    print("5. Optimizing ensemble weights dynamically on OOF probabilities...")
+    # 5. Optimizing ensemble weights dynamically with a diversity floor and Bayesian shrinkage
+    # Structural hedge against Target Encoding drift on unseen test battles:
+    # Models 1, 2, and 4 all utilize Within-Fold Target Encoding (training set historical win rates).
+    # Model 3 is strictly Zero-TE (pure observations: HP, turn counters, stat stages, speed, hazards).
+    # If the unseen test set contains novel archetypes or different playstyles, TE models will make
+    # correlated errors. The diversity floor (min_weight=0.10) prevents Model 3 from being starved.
+    print("5. Optimizing ensemble weights dynamically on OOF probabilities (Robust SLSQP + Shrinkage)...")
     weights = optimize_ensemble_weights(
         y_true=y,
         oof_predictions=P_oof,
         init_weights=heuristic_weights,
+        min_weight=0.10,
+        shrinkage=0.20,
         metric="logloss",
     )
-    print(f"   Heuristic weights: {np.round(heuristic_weights, 4).tolist()}")
-    print(f"   Optimized weights: {np.round(weights, 4).tolist()}")
+    print(f"   Heuristic weights        : {np.round(heuristic_weights, 4).tolist()}")
+    print(f"   Robust optimized weights : {np.round(weights, 4).tolist()}")
 
     ens_oof = np.dot(P_oof, weights)
     ens_test = np.dot(P_test, weights)

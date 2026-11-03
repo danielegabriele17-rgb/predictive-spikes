@@ -166,21 +166,25 @@ def test_model_cv_and_submission_formatting(sample_data, tmp_path):
 def test_optimize_ensemble_weights():
     np.random.seed(42)
     y_true = np.array([1, 1, 0, 0, 1, 0, 1, 0, 1, 1])
-    # 3 mock model prediction columns
-    p1 = np.array([0.9, 0.8, 0.1, 0.2, 0.7, 0.3, 0.8, 0.2, 0.9, 0.6])
+    # 3 mock model prediction columns:
+    # p1 is strong on first 5 samples
+    p1 = np.array([0.9, 0.85, 0.1, 0.15, 0.8, 0.5, 0.5, 0.5, 0.5, 0.5])
+    # p2 is uninformative constant 0.5
     p2 = np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5])
-    p3 = np.array([0.8, 0.7, 0.2, 0.3, 0.6, 0.4, 0.7, 0.1, 0.8, 0.7])
+    # p3 is strong on second 5 samples (complementary signal)
+    p3 = np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.1, 0.9, 0.15, 0.85, 0.9])
     P = np.column_stack([p1, p2, p3])
 
-    opt_w = optimize_ensemble_weights(y_true, P, init_weights=[0.33, 0.33, 0.33], metric="logloss")
+    opt_w = optimize_ensemble_weights(y_true, P, init_weights=[0.33, 0.33, 0.33], min_weight=0.10, metric="logloss")
     assert len(opt_w) == 3
     assert np.isclose(np.sum(opt_w), 1.0)
-    assert all(w >= 0.0 for w in opt_w)
-    # The informative models (p1, p3) should receive much higher weight than the random guesser p2
+    assert all(w >= 0.10 for w in opt_w)
+    # The informative complementary models (p1, p3) should receive higher weight than the random guesser p2
     assert opt_w[0] > opt_w[1] and opt_w[2] > opt_w[1]
 
     # Test accuracy metric
-    opt_w_acc = optimize_ensemble_weights(y_true, P, metric="accuracy")
+    opt_w_acc = optimize_ensemble_weights(y_true, P, min_weight=0.10, metric="accuracy")
     assert len(opt_w_acc) == 3
     assert np.isclose(np.sum(opt_w_acc), 1.0)
+    assert all(w >= 0.10 for w in opt_w_acc)
 
