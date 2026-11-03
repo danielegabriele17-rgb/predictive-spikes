@@ -1,8 +1,14 @@
-"""Environment-aware data loader for local and Kaggle execution."""
+"""Environment-aware data loader for local and Kaggle execution.
+
+This module handles dataset path discovery across local development environments
+and Kaggle's `/kaggle/input` read-only filesystem, parses JSONL battle logs,
+and provides Generation 2 type-effectiveness lookups.
+"""
 
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -10,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 
+# Official competition files required for training, inference, and validation
 REQUIRED_FILES = (
     "train.jsonl",
     "test.jsonl",
@@ -39,10 +46,12 @@ def discover_data_dir(custom_dir: Optional[str | Path] = None) -> Path:
     candidates.append(repo_root / "fds-pokemon-battles-prediction-2026")
     candidates.append(Path.cwd() / "fds-pokemon-battles-prediction-2026")
 
+    # Return the first candidate directory that contains the training set
     for cand in candidates:
         if cand.is_dir() and (cand / "train.jsonl").is_file():
             return cand.resolve()
 
+    # Fallback: recursively scan Kaggle's input directory
     kaggle_input = Path("/kaggle/input")
     if kaggle_input.is_dir():
         for match in kaggle_input.rglob("train.jsonl"):
@@ -75,28 +84,24 @@ def load_jsonl(path: str | Path, max_records: Optional[int] = None) -> List[Dict
             if max_records is not None and idx >= max_records:
                 break
             line = line.strip()
-            if not line:
-                continue
-            records.append(json.loads(line))
+            if line:
+                records.append(json.loads(line))
     return records
 
 
 def load_type_chart(path: Optional[str | Path] = None) -> Dict[Tuple[str, str], float]:
-    """Load the Generation 2 type chart into a (attacking_type, defending_type) -> multiplier dict.
+    """Load the Generation 2 type chart into a `(attacking_type, defending_type) -> multiplier` dict.
 
-    Pairs not listed in `type_chart_gen2.csv` have neutral effectiveness (1.0),
-    and `'notype'` always has neutral effectiveness (1.0).
+    Uses vectorized pandas string normalization. Pairs not listed in `type_chart_gen2.csv`
+    default to neutral effectiveness (1.0), and `'notype'` is always neutral (1.0).
     """
     if path is None:
         path = get_data_paths()["type_chart_gen2"]
     df = pd.read_csv(path)
-    chart: Dict[Tuple[str, str], float] = {}
-    for row in df.itertuples(index=False):
-        atk_t = str(row.attacking_type).strip().lower()
-        def_t = str(row.defending_type).strip().lower()
-        mult = float(row.multiplier)
-        chart[(atk_t, def_t)] = mult
-    return chart
+    atk_types = df["attacking_type"].astype(str).str.strip().str.lower()
+    def_types = df["defending_type"].astype(str).str.strip().str.lower()
+    multipliers = df["multiplier"].astype(float)
+    return dict(zip(zip(atk_types, def_types), multipliers))
 
 
 def get_type_effectiveness(
@@ -104,16 +109,19 @@ def get_type_effectiveness(
     def_types: List[str] | Tuple[str, ...],
     type_chart: Dict[Tuple[str, str], float],
 ) -> float:
-    """Compute Generation 2 type effectiveness multiplier of `atk_type` against `def_types`."""
+    """Compute Generation 2 type effectiveness multiplier of `atk_type` against `def_types`.
+
+    For dual-type defending Pokémon (e.g., Rock/Ground), individual type multipliers
+    are multiplied together via `math.prod` (yielding values in {0.0, 0.25, 0.5, 1.0, 2.0, 4.0}).
+    """
     if not atk_type or atk_type in ("notype", "threequestionmarks", "none"):
         return 1.0
     atk_t = atk_type.lower()
-    mult = 1.0
-    for dt in def_types:
-        if not dt or dt == "notype":
-            continue
-        mult *= type_chart.get((atk_t, dt.lower()), 1.0)
-    return mult
+    return math.prod(
+        type_chart.get((atk_t, dt.lower()), 1.0)
+        for dt in def_types
+        if dt and dt != "notype"
+    )
 
 
 def load_competition_data(

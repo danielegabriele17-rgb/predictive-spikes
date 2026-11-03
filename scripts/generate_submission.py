@@ -1,4 +1,4 @@
-"""Reproduce the three selected competition submissions from version-controlled configurations."""
+"""Reproduce the final competition submission.csv from version-controlled configurations."""
 
 from __future__ import annotations
 
@@ -28,13 +28,13 @@ from src.submission import generate_submission, validate_submission_df
 from src.validation import get_cv_splits
 
 
-def reproduce_all_submissions(
+def reproduce_submission(
     config_path: str | Path | None = None,
     output_dir: str | Path | None = None,
     data_dir: str | Path | None = None,
-) -> Dict[str, pd.DataFrame]:
+) -> pd.DataFrame:
     """Load `configs/experiments.yaml`, retrain the selected XGBoost models via 5-fold CV,
-    and generate the three validated competition submission CSV files.
+    and generate the single validated `submission.csv` file directly from the ensemble.
     """
     t0 = time.perf_counter()
     if config_path is None:
@@ -138,47 +138,18 @@ def reproduce_all_submissions(
         f"| AUC: {roc_auc_score(y, ens_oof):.4f} | LogLoss: {log_loss(y, ens_oof):.4f}"
     )
 
-    print("5. Generating and validating submission CSV files...")
-    sub1 = generate_submission(
-        test_ids,
-        (test_map["model4_compact_top140_te"] >= threshold).astype(int),
-        sample_sub,
-        output_path=out_path / "submission_1_compact_top140_xgb.csv",
-    )
-    sub2 = generate_submission(
-        test_ids,
-        (test_map["model2_conservative_depth4_pruned_te"] >= threshold).astype(int),
-        sample_sub,
-        output_path=out_path / "submission_2_conservative_depth4_xgb.csv",
-    )
-    sub3 = generate_submission(
-        test_ids,
-        (ens_test >= threshold).astype(int),
-        sample_sub,
-        output_path=out_path / "submission_3_diverse_xgb_ensemble.csv",
-    )
-    generate_submission(
+    print("5. Generating and validating final submission.csv...")
+    sub_df = generate_submission(
         test_ids,
         (ens_test >= threshold).astype(int),
         sample_sub,
         output_path=out_path / "submission.csv",
     )
-
-    for label, df_s in [
-        ("submission_1_compact_top140_xgb.csv", sub1),
-        ("submission_2_conservative_depth4_xgb.csv", sub2),
-        ("submission_3_diverse_xgb_ensemble.csv", sub3),
-    ]:
-        info = validate_submission_df(df_s, sample_sub)
-        print(f"   Validated {label:42s}: {info}")
-
+    info = validate_submission_df(sub_df, sample_sub)
+    print(f"   Validated submission.csv: {info}")
     print(f"Done in {time.perf_counter() - t0:.2f}s.")
-    return {
-        "submission_1": sub1,
-        "submission_2": sub2,
-        "submission_3": sub3,
-    }
+    return sub_df
 
 
 if __name__ == "__main__":
-    reproduce_all_submissions()
+    reproduce_submission()

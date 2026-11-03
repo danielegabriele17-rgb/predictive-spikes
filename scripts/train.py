@@ -344,7 +344,7 @@ def main() -> None:
     with open(cfg_dir / "experiments.yaml", "w", encoding="utf-8") as f:
         yaml.safe_dump(saved_configs, f, sort_keys=False)
 
-    # Generate and validate the 3 final competition submissions
+    # Generate and validate the single final competition submission.csv directly from the ensemble
     assert test_probs_m1 is not None and test_probs_m2 is not None and test_probs_m3 is not None and test_probs_m4 is not None
     ens_test_probs = (
         ens_weights[0] * test_probs_m1
@@ -353,46 +353,16 @@ def main() -> None:
         + ens_weights[3] * test_probs_m4
     )
 
-    sub1_df = generate_submission(
-        test_ids,
-        (test_probs_m4 >= 0.5).astype(int),
-        sample_sub,
-        output_path=out_dir / "submission_1_compact_top140_xgb.csv",
-    )
-    sub2_df = generate_submission(
-        test_ids,
-        (test_probs_m2 >= 0.5).astype(int),
-        sample_sub,
-        output_path=out_dir / "submission_2_conservative_depth4_xgb.csv",
-    )
-    sub3_df = generate_submission(
-        test_ids,
-        (ens_test_probs >= 0.5).astype(int),
-        sample_sub,
-        output_path=out_dir / "submission_3_diverse_xgb_ensemble.csv",
-    )
-    # Also write default submission.csv as Submission 3 (the top-performing ensemble)
-    generate_submission(
+    sub_df = generate_submission(
         test_ids,
         (ens_test_probs >= 0.5).astype(int),
         sample_sub,
         output_path=out_dir / "submission.csv",
     )
 
-    print("\n=== Phase 7: Validated Final Submissions Summary ===")
-    for name, sdf in [
-        ("submission_1_compact_top140_xgb.csv", sub1_df),
-        ("submission_2_conservative_depth4_xgb.csv", sub2_df),
-        ("submission_3_diverse_xgb_ensemble.csv", sub3_df),
-    ]:
-        v_info = validate_submission_df(sdf, sample_sub)
-        print(f"  {name:42s} -> {v_info}")
-
-    # Pairwise agreement between the 3 submissions
-    agree_12 = float(np.mean(sub1_df["player_won"] == sub2_df["player_won"]))
-    agree_13 = float(np.mean(sub1_df["player_won"] == sub3_df["player_won"]))
-    agree_23 = float(np.mean(sub2_df["player_won"] == sub3_df["player_won"]))
-    print(f"Pairwise prediction agreement on 5,000 test battles: (1,2)={agree_12:.4f}, (1,3)={agree_13:.4f}, (2,3)={agree_23:.4f}")
+    print("\n=== Phase 7: Validated Final Submission Summary ===")
+    v_info = validate_submission_df(sub_df, sample_sub)
+    print(f"  submission.csv -> {v_info}")
     print(f"Total pipeline runtime: {time.perf_counter() - t_start:.2f}s")
 
 

@@ -164,3 +164,29 @@ def get_feature_importance_df(models: List[XGBClassifier], feature_names: List[s
         .sort_values("importance", ascending=False)
         .reset_index(drop=True)
     )
+
+
+def xgb_select_features(
+    X_df: pd.DataFrame,
+    y: np.ndarray,
+    max_features: int = 140,
+    xgb_params: Optional[Dict[str, Any]] = None,
+    seed: int = 42,
+) -> List[str]:
+    """Select the top `max_features` columns natively using `XGBClassifier` + `SelectFromModel`."""
+    from sklearn.feature_selection import SelectFromModel
+
+    selector_model = build_xgb_model(params=xgb_params, seed=seed, early_stopping_rounds=None)
+    selector = SelectFromModel(
+        estimator=selector_model,
+        max_features=max_features,
+        threshold=-np.inf,
+    )
+    selector.fit(X_df, y)
+    selected_mask = selector.get_support()
+    selected_cols = list(X_df.columns[selected_mask])
+    # Order selected columns by native XGBoost gain importance descending
+    importances = selector.estimator_.feature_importances_[selected_mask]
+    order = np.argsort(-importances)
+    return [selected_cols[i] for i in order]
+

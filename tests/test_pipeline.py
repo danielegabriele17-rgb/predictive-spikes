@@ -31,7 +31,7 @@ from src.feature_engineering import (
     WithinFoldTargetEncoder,
     build_feature_dataframe,
 )
-from src.model import build_xgb_model, run_xgb_cv
+from src.model import build_xgb_model, run_xgb_cv, xgb_select_features
 from src.submission import generate_submission, validate_submission_df
 from src.validation import compute_battle_groups, get_cv_splits
 
@@ -165,3 +165,17 @@ def test_model_cv_and_submission_formatting(sample_data, tmp_path):
     info = validate_submission_df(sub_df, sample_sub)
     assert info["valid"] is True
     assert info["n_rows"] == len(sample_sub)
+
+
+def test_xgb_native_feature_selection(sample_data):
+    train_small, _, _, type_chart, catalogue = sample_data
+    X_tr, _, y_tr = build_feature_dataframe(train_small, families=ALL_FEATURE_FAMILIES, catalogue=catalogue, type_chart=type_chart)
+    selected = xgb_select_features(
+        X_tr,
+        y_tr,
+        max_features=40,
+        xgb_params={"n_estimators": 20, "max_depth": 3, "n_jobs": 2},
+    )
+    assert len(selected) == 40
+    assert all(col in X_tr.columns for col in selected)
+
