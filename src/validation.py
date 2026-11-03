@@ -83,9 +83,11 @@ def optimize_threshold_oof(
     oof_probs: np.ndarray,
     splits: List[Tuple[np.ndarray, np.ndarray]],
 ) -> Tuple[float, float, float]:
-    """Evaluate default 0.5 threshold vs nested out-of-fold threshold optimization.
+    """Evaluate default 0.5 decision threshold vs nested out-of-fold threshold tuning.
 
-    Returns (best_global_threshold, nested_cv_acc_with_tuned_threshold, default_05_acc).
+    Uses vectorized NumPy broadcasting `(probs[:, None] >= thresholds[None, :])`
+    instead of Python loops to evaluate all 201 candidate thresholds simultaneously.
+    Returns `(best_global_threshold, nested_cv_acc_with_tuned_threshold, default_05_acc)`.
     """
     default_acc = float(accuracy_score(y_true, (oof_probs >= 0.5).astype(int)))
     thresholds = np.linspace(0.40, 0.60, 201)
@@ -94,11 +96,12 @@ def optimize_threshold_oof(
     for tr_idx, va_idx in splits:
         tr_probs = oof_probs[tr_idx]
         tr_y = y_true[tr_idx]
-        accs = [accuracy_score(tr_y, (tr_probs >= t).astype(int)) for t in thresholds]
+        # Vectorized accuracy evaluation across all 201 thresholds on the training fold
+        accs = np.mean((tr_probs[:, None] >= thresholds[None, :]) == tr_y[:, None], axis=0)
         best_t = float(thresholds[int(np.argmax(accs))])
         nested_preds[va_idx] = (oof_probs[va_idx] >= best_t).astype(int)
 
     nested_acc = float(accuracy_score(y_true, nested_preds))
-    global_accs = [accuracy_score(y_true, (oof_probs >= t).astype(int)) for t in thresholds]
+    global_accs = np.mean((oof_probs[:, None] >= thresholds[None, :]) == y_true[:, None], axis=0)
     best_global_t = float(thresholds[int(np.argmax(global_accs))])
     return best_global_t, nested_acc, default_acc

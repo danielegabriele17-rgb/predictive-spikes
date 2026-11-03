@@ -154,11 +154,12 @@ def run_xgb_cv(
 
 
 def get_feature_importance_df(models: List[XGBClassifier], feature_names: List[str]) -> pd.DataFrame:
-    """Compute mean feature importance across CV fold models."""
-    imps = np.zeros(len(feature_names), dtype=float)
-    for m in models:
-        imps += m.feature_importances_
-    imps /= max(1, len(models))
+    """Compute mean gain feature importance across CV fold models using vectorized NumPy averaging."""
+    imps = (
+        np.mean([m.feature_importances_ for m in models], axis=0)
+        if models
+        else np.zeros(len(feature_names), dtype=float)
+    )
     return (
         pd.DataFrame({"feature": feature_names, "importance": imps})
         .sort_values("importance", ascending=False)

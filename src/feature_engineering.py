@@ -99,16 +99,11 @@ def build_feature_dataframe(
     if type_chart is None:
         type_chart = {}
 
-    rows: List[Dict[str, float]] = []
-    battle_ids = np.zeros(len(battles), dtype=int)
+    # Extract battle IDs, optional binary targets, and observation-only feature rows
+    battle_ids = np.array([int(b.get("battle_id", idx)) for idx, b in enumerate(battles)], dtype=int)
     has_target = len(battles) > 0 and ("player_won" in battles[0])
-    y = np.zeros(len(battles), dtype=int) if has_target else None
-
-    for idx, b in enumerate(battles):
-        battle_ids[idx] = int(b.get("battle_id", idx))
-        if has_target and y is not None:
-            y[idx] = int(b["player_won"])
-        rows.append(extract_battle_features_single(b, families, catalogue, type_chart))
+    y = np.array([int(b["player_won"]) for b in battles], dtype=int) if has_target else None
+    rows = [extract_battle_features_single(b, families, catalogue, type_chart) for b in battles]
 
     X_df = pd.DataFrame(rows)
     return X_df, battle_ids, y
