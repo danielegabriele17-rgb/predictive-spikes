@@ -12,7 +12,9 @@ from src.battle_features import (
     build_species_catalogue,
     extract_interaction_features,
     extract_matchup_features,
+    extract_organizer_features,
     extract_p2_observed_features,
+    extract_simple_state_features,
     extract_state_features,
     extract_team_features,
     extract_temporal_features,
@@ -40,8 +42,15 @@ def extract_battle_features_single(
     fam_set = set(families)
     feats: Dict[str, float] = {}
 
+    if "organizer" in fam_set:
+        feats.update(extract_organizer_features(battle))
+        return feats
+
     if "team" in fam_set:
         feats.update(extract_team_features(battle))
+
+    if "simple_state" in fam_set:
+        feats.update(extract_simple_state_features(battle))
 
     needs_recon = bool(fam_set & {"p2_observed", "state", "temporal", "matchup", "interactions"})
     if needs_recon:
@@ -134,6 +143,11 @@ class WithinFoldTargetEncoder:
 
         p1_alive = [n for n, h in p1_hp.items() if h > 0.0]
         p2_alive = [n for n, h in p2_hp.items() if h > 0.0]
+        p1_sig = tuple(sorted(p1_names))
+        p2_sig = tuple(sorted(p2_hp.keys()))
+        tl = battle.get("battle_timeline", [])
+        act_p1 = tl[-1]["p1_pokemon_state"]["name"] if tl else ""
+        act_p2 = tl[-1]["p2_pokemon_state"]["name"] if tl else ""
         return {
             "p1_names": p1_names,
             "p2_names": list(p2_hp.keys()),
@@ -141,8 +155,10 @@ class WithinFoldTargetEncoder:
             "p2_alive": p2_alive,
             "p1_hp": p1_hp,
             "p2_hp": p2_hp,
-            "p1_sig": tuple(sorted(p1_names)),
-            "p2_sig": tuple(sorted(p2_hp.keys())),
+            "p1_sig": p1_sig,
+            "p2_sig": p2_sig,
+            "act_p1": act_p1,
+            "act_p2": act_p2,
         }
 
     def fit(self, train_battles: Sequence[Dict[str, Any]], y_train: np.ndarray) -> "WithinFoldTargetEncoder":
@@ -258,35 +274,3 @@ class WithinFoldTargetEncoder:
 
         self.fit(train_battles, y_train)
         return pd.DataFrame(oof_rows)
-
-
-def get_default_feature_subsets(
-    config_path: Optional[str | Path] = None,
-) -> Dict[str, List[str]]:
-    """Return the curated feature subsets for the diverse 4-model ensemble.
-
-    Loads the feature lists (pruned, top200, top220, top140) from `configs/experiments.yaml`
-    if present, or looks for it relative to repository root / current working directory.
-    """
-    from pathlib import Path
-    import yaml
-
-    candidates: List[Path] = []
-    if config_path is not None:
-        candidates.append(Path(config_path))
-    repo_root = Path(__file__).resolve().parent.parent
-    candidates.append(repo_root / "configs" / "experiments.yaml")
-    candidates.append(Path.cwd() / "configs" / "experiments.yaml")
-
-    for cand in candidates:
-        if cand.exists():
-            with open(cand, "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f)
-                if "feature_subsets" in cfg:
-                    return cfg["feature_subsets"]
-
-    raise FileNotFoundError(
-        "Could not locate feature subsets configuration in experiments.yaml. "
-        "Please provide an explicit config_path or ensure configs/experiments.yaml is present."
-    )
-

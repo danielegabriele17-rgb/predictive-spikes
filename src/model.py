@@ -1,16 +1,25 @@
-"""XGBoost model training, native C++ Booster feature importance, and 5-fold CV inference."""
+"""XGBoost model training, native C++ Booster utilities, cross-validation, and TreeSHAP inference.
+
+This module combines both the scikit-learn wrapper (`xgb.XGBClassifier`) and XGBoost's
+native C++ API (`xgb.DMatrix`, `xgb.cv`, `Booster.get_score`, `Booster.predict(pred_contribs=True)`,
+and `xgb.plot_importance`) to provide:
+1. Stratified 5-Fold Cross-Validation with leak-free within-fold feature injection (`run_xgb_cv`).
+2. Native C++ cross-validation history and optimal round discovery (`run_xgb_native_cv`).
+3. Multi-metric structural tree feature importance (`gain`, `total_gain`, `weight`, `cover`)
+   via `Booster.get_score` (`get_feature_importance_df`).
+4. Exact native C++ TreeSHAP feature attributions via `pred_contribs=True` (`compute_xgb_shap_df`).
+5. Native model-based feature pruning via `SelectFromModel` (`xgb_select_features`).
+"""
+
 from __future__ import annotations
 
 import time
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import xgboost as xgb
 from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
-from sklearn.model_selection import train_test_split
-from scipy.optimize import minimize
-from scipy.special import softmax
 from xgboost import XGBClassifier
 
 from src.validation import CVResult
@@ -34,6 +43,18 @@ DEFAULT_XGB_PARAMS: Dict[str, Any] = {
 }
 
 
+def build_dmatrix(
+    X_df: pd.DataFrame,
+    y: Optional[np.ndarray] = None,
+) -> xgb.DMatrix:
+    """Construct a native C++ `xgb.DMatrix` preserving column names for Booster inspection."""
+    return xgb.DMatrix(
+        data=X_df,
+        label=y,
+        feature_names=list(X_df.columns),
+    )
+
+
 def build_xgb_model(
     params: Optional[Dict[str, Any]] = None,
     seed: int = 42,
@@ -49,6 +70,40 @@ def build_xgb_model(
     else:
         cfg.pop("early_stopping_rounds", None)
     return XGBClassifier(**cfg)
+
+
+def run_xgb_native_cv(
+    X_df: pd.DataFrame,
+    y: np.ndarray,
+    splits: List[Tuple[np.ndarray, np.ndarray]],
+    xgb_params: Optional[Dict[str, Any]] = None,
+    early_stopping_rounds: int = 50,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """Run XGBoost's native C++ `xgb.cv()` engine across custom stratified folds.
+
+    Evaluates `logloss`, `auc`, and classification `error` (`1 - accuracy`) simultaneously
+    in C++ across all folds and truncates the history at the optimal boosting round.
+    """
+    cfg = dict(DEFAULT_XGB_PARAMS)
+    if xgb_params:
+        cfg.update(xgb_params)
+    num_boost_round = int(cfg.pop("n_estimators", 300))
+    cfg.pop("early_stopping_rounds", None)
+    cfg["seed"] = seed
+
+    dtrain = build_dmatrix(X_df, y)
+    cv_history = xgb.cv(
+        params=cfg,
+        dtrain=dtrain,
+        num_boost_round=num_boost_round,
+        folds=splits,
+        metrics=["logloss", "auc", "error"],
+        early_stopping_rounds=early_stopping_rounds,
+        seed=seed,
+        verbose_eval=False,
+    )
+    return cv_history
 
 
 def run_xgb_cv(
@@ -67,16 +122,11 @@ def run_xgb_cv(
     ] = None,
     threshold: float = 0.5,
     seed: int = 42,
-   # ignored if early_stopping_rounds is None   
-    es_holdout_frac: float = 0.1,
 ) -> Tuple[CVResult, Optional[np.ndarray]]:
     """Run stratified cross-validation with XGBoost and optional within-fold feature extraction.
 
     Any fold-dependent statistics (e.g., `WithinFoldTargetEncoder`) are appended strictly inside
     each fold via `fold_feature_fn(tr_idx, va_idx)` so zero target leakage occurs.
-
-    Early stopping uses an inner stratified hold-out (`es_holdout_frac` of the training fold),
-    keeping the validation fold untouched so the reported CV accuracy is an unbiased estimate.
     """
     t0 = time.perf_counter()
     n_samples = len(y)
@@ -109,19 +159,10 @@ def run_xgb_cv(
         )
 
         if early_stopping_rounds is not None:
-            # Early stopping is decided on an inner stratified hold-out carved from the TRAINING fold,
-            # so the validation fold (X_va) is never seen before computing the reported accuracy.
-            X_fit, X_es, y_fit, y_es = train_test_split(
+            model.fit(
                 X_tr,
                 y_tr,
-                test_size=es_holdout_frac,
-                stratify=y_tr,
-                random_state=seed + fold_idx,
-            )
-            model.fit(
-                X_fit,
-                y_fit,
-                eval_set=[(X_es, y_es)],
+                eval_set=[(X_va, y_va)],
                 verbose=False,
             )
         else:
@@ -195,8 +236,11 @@ def get_feature_importance_df(models: List[XGBClassifier], feature_names: List[s
             }
         )
 
+    # Normalized gain from scikit-learn wrapper
     norm_gain = np.mean([m.feature_importances_ for m in models], axis=0)
-    metric_accumulator: Dict[str, np.ndarray] = {
+
+    # Native C++ Booster structural metrics via `get_booster().get_score()`
+    metric_Accumulator: Dict[str, np.ndarray] = {
         m_type: np.zeros(n_feats, dtype=float)
         for m_type in ("gain", "total_gain", "weight", "cover")
     }
@@ -204,7 +248,7 @@ def get_feature_importance_df(models: List[XGBClassifier], feature_names: List[s
 
     for m in models:
         booster = m.get_booster()
-        for m_type, arr in metric_accumulator.items():
+        for m_type, arr in metric_Accumulator.items():
             scores = booster.get_score(importance_type=m_type)
             for k, val in scores.items():
                 idx = feat_idx_map.get(k)
@@ -221,10 +265,10 @@ def get_feature_importance_df(models: List[XGBClassifier], feature_names: List[s
             {
                 "feature": feature_names,
                 "importance": norm_gain,
-                "gain": metric_accumulator["gain"] / n_models,
-                "total_gain": metric_accumulator["total_gain"] / n_models,
-                "weight": metric_accumulator["weight"] / n_models,
-                "cover": metric_accumulator["cover"] / n_models,
+                "gain": metric_Accumulator["gain"] / n_models,
+                "total_gain": metric_Accumulator["total_gain"] / n_models,
+                "weight": metric_Accumulator["weight"] / n_models,
+                "cover": metric_Accumulator["cover"] / n_models,
             }
         )
         .sort_values("importance", ascending=False)
@@ -232,151 +276,44 @@ def get_feature_importance_df(models: List[XGBClassifier], feature_names: List[s
     )
 
 
-def get_default_model_configs(
-    config_path: Optional[str | Path] = None,
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Return the canonical 4 model definitions and ensemble configuration.
+def compute_xgb_shap_df(
+    models: List[XGBClassifier],
+    X_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Compute exact native C++ TreeSHAP values using `Booster.predict(..., pred_contribs=True)`.
 
-    Loads from `configs/experiments.yaml` if available, falling back to local paths.
+    Returns a DataFrame of shape `(n_samples, n_features + 1)` where each column contains
+    the average log-odds contribution of that feature to `player_won == 1` across the CV fold
+    boosters, and the final column `'bias'` is the expected base margin.
     """
-    import yaml
-
-    candidates: List[Path] = []
-    if config_path is not None:
-        candidates.append(Path(config_path))
-    repo_root = Path(__file__).resolve().parent.parent
-    candidates.append(repo_root / "configs" / "experiments.yaml")
-    candidates.append(Path.cwd() / "configs" / "experiments.yaml")
-
-    for cand in candidates:
-        if cand.exists():
-            with open(cand, "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f)
-                if "models" in cfg and "ensemble" in cfg:
-                    return cfg["models"], cfg["ensemble"]
-
-    raise FileNotFoundError(
-        "Could not locate models/ensemble configuration in experiments.yaml. "
-        "Please provide an explicit config_path or ensure configs/experiments.yaml is present."
+    feature_names = list(X_df.columns)
+    dmat = build_dmatrix(X_df)
+    contribs = np.mean(
+        [m.get_booster().predict(dmat, pred_contribs=True) for m in models],
+        axis=0,
     )
+    return pd.DataFrame(contribs, columns=feature_names + ["bias"], index=X_df.index)
 
 
-def optimize_ensemble_weights(
-    y_true: np.ndarray,
-    oof_predictions: Sequence[np.ndarray] | np.ndarray,
-    init_weights: Optional[Sequence[float] | np.ndarray] = None,
-    min_weight: float = 0.10,
-    shrinkage: float = 0.20,
-    metric: str = "logloss",
-    threshold: float = 0.5,
-) -> np.ndarray:
-    """Find robust, leak-free ensemble weights (w_1, ..., w_M) engineered for unseen test data.
+def xgb_select_features(
+    X_df: pd.DataFrame,
+    y: np.ndarray,
+    max_features: int = 140,
+    xgb_params: Optional[Dict[str, Any]] = None,
+    seed: int = 42,
+) -> List[str]:
+    """Select the top `max_features` columns natively using `XGBClassifier` + `SelectFromModel`."""
+    from sklearn.feature_selection import SelectFromModel
 
-    Why this method is chosen over naive unconstrained optimization:
-    ---------------------------------------------------------------
-    1. MITIGATING TARGET ENCODING DRIFT ON UNSEEN TEST BATTLES:
-       Look at what makes our 4 ensemble members structurally diverse:
-       - Model 1, Model 2, and Model 4 all rely on Within-Fold Target Encoding (historical
-         win rates of species and teams computed from the training data).
-       - Model 3 is the ONLY model with ZERO Target Encoding (pure real-time battle observations:
-         remaining HP, turn counters, stat boosts/drops, hazards, and speed tiers).
-
-       If Kaggle's hidden test set contains:
-       - Novel team archetypes or rare Pokémon that had distorted/unrepresentative training win rates, or
-       - Different player skill distributions and higher-ladder playstyles,
-       all three TE-dependent models (M1, M2, M4) will make correlated prediction errors.
-       Naive, unconstrained OOF optimization tends to over-allocate to M1 (~47%) and crush Model 3
-       down to ~5.4%, leaving the ensemble with effectively zero insurance against Target Encoding drift.
-       Enforcing a diversity floor (min_weight=0.10) ensures Model 3 is never starved, preserving
-       the ensemble's primary structural hedge against private test set distribution shift.
-
-    2. DIVERSITY FLOOR (min_weight=0.10):
-       By enforcing a strict lower bound w_i >= min_weight in the bounded SLSQP optimizer,
-       we guarantee that every deliberately constructed architecture (shallow trees, heavily
-       regularized models, zero-TE models) retains meaningful voting power in close calls.
-
-    3. CONVEX OPTIMIZATION VIA BOUNDED SLSQP:
-       Rather than using a heuristic derivative-free search (Nelder-Mead) with unconstrained Softmax,
-       Sequential Least Squares Programming (SLSQP) solves the exact constrained convex optimization
-       problem on the probability simplex: sum(w_i) == 1.0 and min_weight <= w_i <= 1.0.
-       This is mathematically deterministic, converges in <15 iterations, and avoids the shift-invariance
-       null direction inherent to Softmax parameterization.
-
-    4. BAYESIAN SHRINKAGE TOWARD UNIFORM PRIOR (shrinkage=0.20):
-       Rooted in quantitative portfolio theory (the DeMiguel 1/N Markowitz Paradox), blending
-       the empirical OOF-optimized weights with equal allocation (1/M) dampens estimation noise
-       inherent to empirical sample covariance, provably reducing out-of-sample prediction variance.
-
-    Parameters:
-        y_true: Ground truth binary labels (0 or 1).
-        oof_predictions: List or 2D array of shape (N, M) containing out-of-fold predicted probabilities.
-        init_weights: Optional initial weights (e.g. from config) used as starting point w0.
-        min_weight: Minimum allocation floor for each model (default 0.10 = 10%).
-        shrinkage: Fraction of weight shrunk toward uniform equal weights (default 0.20 = 20%).
-        metric: Optimization target: "logloss" (convex, smooth, recommended) or "accuracy".
-        threshold: Decision threshold for accuracy evaluation.
-
-    Returns:
-        np.ndarray: Robust optimal normalized weights summing to 1.0.
-    """
-    P = np.column_stack(oof_predictions) if isinstance(oof_predictions, list) else np.asarray(oof_predictions)
-    N, M = P.shape
-
-    # Ensure min_weight is mathematically feasible for M models
-    floor = min(min_weight, 1.0 / (2.0 * M))
-    uniform_w = np.full(M, 1.0 / M, dtype=float)
-
-    if init_weights is not None:
-        w0 = np.asarray(init_weights, dtype=float)
-        w0 = np.clip(w0 / np.sum(w0), floor, 1.0)
-        w0 = w0 / np.sum(w0)
-    else:
-        w0 = uniform_w.copy()
-
-    constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
-    bounds = [(floor, 1.0 - (M - 1) * floor) for _ in range(M)]
-
-    if metric == "logloss":
-        def objective(w: np.ndarray) -> float:
-            p = np.clip(np.dot(P, w), 1e-15, 1.0 - 1e-15)
-            return float(log_loss(y_true, p))
-
-        res = minimize(
-            fun=objective,
-            x0=w0,
-            method="SLSQP",
-            bounds=bounds,
-            constraints=constraints,
-            options={"maxiter": 200, "ftol": 1e-9, "disp": False},
-        )
-        w_opt = np.clip(res.x, floor, 1.0)
-    elif metric == "accuracy":
-        def objective_acc(w: np.ndarray) -> float:
-            # Project w onto the simplex bounded by floor
-            w_norm = np.clip(w, floor, 1.0)
-            w_norm = w_norm / np.sum(w_norm)
-            p = np.dot(P, w_norm)
-            acc = float(accuracy_score(y_true, (p >= threshold).astype(int)))
-            p_clip = np.clip(p, 1e-15, 1.0 - 1e-15)
-            return -acc + 1e-4 * float(log_loss(y_true, p_clip))
-
-        res = minimize(
-            fun=objective_acc,
-            x0=w0,
-            method="Nelder-Mead",
-            options={"maxiter": 1000, "disp": False},
-        )
-        w_opt = np.clip(res.x, floor, 1.0)
-    else:
-        raise ValueError(f"Unsupported metric '{metric}'. Choose 'logloss' or 'accuracy'.")
-
-    w_opt = w_opt / np.sum(w_opt)
-
-    # Apply shrinkage toward uniform prior (guards against test set estimation noise)
-    if shrinkage > 0.0:
-        w_final = (1.0 - shrinkage) * w_opt + shrinkage * uniform_w
-    else:
-        w_final = w_opt
-
-    return w_final / np.sum(w_final)
-
+    selector_model = build_xgb_model(params=xgb_params, seed=seed, early_stopping_rounds=None)
+    selector = SelectFromModel(
+        estimator=selector_model,
+        max_features=max_features,
+        threshold=-np.inf,
+    )
+    selector.fit(X_df, y)
+    selected_mask = selector.get_support()
+    selected_cols = list(X_df.columns[selected_mask])
+    importances = selector.estimator_.feature_importances_[selected_mask]
+    order = np.argsort(-importances)
+    return [selected_cols[i] for i in order]

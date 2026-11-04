@@ -23,7 +23,7 @@ from src.feature_engineering import (
     WithinFoldTargetEncoder,
     build_feature_dataframe,
 )
-from src.model import optimize_ensemble_weights, run_xgb_cv
+from src.model import run_xgb_cv
 from src.submission import generate_submission, validate_submission_df
 from src.validation import get_cv_splits
 
@@ -124,42 +124,21 @@ def reproduce_submission(
 
     ens_cfg = cfg["ensemble"]
     members = ens_cfg["members"]
-    heuristic_weights = np.asarray(ens_cfg["weights"], dtype=float)
-    heuristic_weights = heuristic_weights / np.sum(heuristic_weights)
+    weights = np.asarray(ens_cfg["weights"], dtype=float)
+    weights = weights / np.sum(weights)
 
-    P_oof = np.column_stack([oof_map[m] for m in members])
-    P_test = np.column_stack([test_map[m] for m in members])
-
-    # 5. Optimizing ensemble weights dynamically with a diversity floor and Bayesian shrinkage
-    # Structural hedge against Target Encoding drift on unseen test battles:
-    # Models 1, 2, and 4 all utilize Within-Fold Target Encoding (training set historical win rates).
-    # Model 3 is strictly Zero-TE (pure observations: HP, turn counters, stat stages, speed, hazards).
-    # If the unseen test set contains novel archetypes or different playstyles, TE models will make
-    # correlated errors. The diversity floor (min_weight=0.10) prevents Model 3 from being starved.
-    print("5. Optimizing ensemble weights dynamically on OOF probabilities (Robust SLSQP + Shrinkage)...")
-    weights = optimize_ensemble_weights(
-        y_true=y,
-        oof_predictions=P_oof,
-        init_weights=heuristic_weights,
-        min_weight=0.10,
-        shrinkage=0.20,
-        metric="logloss",
-    )
-    print(f"   Heuristic weights        : {np.round(heuristic_weights, 4).tolist()}")
-    print(f"   Robust optimized weights : {np.round(weights, 4).tolist()}")
-
-    ens_oof = np.dot(P_oof, weights)
-    ens_test = np.dot(P_test, weights)
+    ens_oof = sum(w * oof_map[m] for w, m in zip(weights, members))
+    ens_test = sum(w * test_map[m] for w, m in zip(weights, members))
     ens_fold_accs = [
         float(accuracy_score(y[va_idx], (ens_oof[va_idx] >= threshold).astype(int)))
         for _, va_idx in cv_splits
     ]
     print(
-        f"   [{'ensemble_dynamic_weighted_blend':36s}] CV Acc: {np.mean(ens_fold_accs):.4f} +/- {np.std(ens_fold_accs):.4f} "
+        f"   [{'ensemble_diverse_xgb_blend':36s}] CV Acc: {np.mean(ens_fold_accs):.4f} +/- {np.std(ens_fold_accs):.4f} "
         f"| AUC: {roc_auc_score(y, ens_oof):.4f} | LogLoss: {log_loss(y, ens_oof):.4f}"
     )
 
-    print("6. Generating and validating final submission.csv...")
+    print("5. Generating and validating final submission.csv...")
     sub_df = generate_submission(
         test_ids,
         (ens_test >= threshold).astype(int),

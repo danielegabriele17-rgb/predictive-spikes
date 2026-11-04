@@ -46,6 +46,7 @@ SLEEP_INDUCING_MOVES: Set[str] = {"sleeppowder", "lovelykiss", "hypnosis", "spor
 PARA_INDUCING_MOVES: Set[str] = {"thunderwave", "stunspore", "glare", "bodyslam", "zapcannon"}
 POISON_INDUCING_MOVES: Set[str] = {"toxic", "poisonpowder", "sludgebomb"}
 FIXED_DAMAGE_MOVES: Set[str] = {"seismictoss", "nightshade", "counter", "mirrorcoat", "superfang", "fissure", "guillotine", "horndrill"}
+RECOIL_MOVES: Set[str] = {"doubleedge", "submission", "takedown"}
 
 
 def get_stage_multiplier(stage: int) -> float:
@@ -97,6 +98,20 @@ def get_species_stats(name: str, catalogue: Dict[str, Dict[str, Any]]) -> Dict[s
     if name in catalogue:
         return catalogue[name]
     return {"types": [], **{f"base_{st}": 80.0 for st in STAT_NAMES}}
+
+
+def extract_organizer_features(battle: Dict[str, Any]) -> Dict[str, float]:
+    """Reproduce the exact 6 baseline features from the organizer's `notebook baseline.ipynb`."""
+    p1_team = battle.get("p1_team_details", [])
+    p2_lead = battle.get("p2_lead_details") or {}
+    return {
+        "p1_mean_hp": float(np.mean([p.get("base_hp", 0) for p in p1_team])) if p1_team else 0.0,
+        "p1_mean_spe": float(np.mean([p.get("base_spe", 0) for p in p1_team])) if p1_team else 0.0,
+        "p1_mean_atk": float(np.mean([p.get("base_atk", 0) for p in p1_team])) if p1_team else 0.0,
+        "p1_mean_def": float(np.mean([p.get("base_def", 0) for p in p1_team])) if p1_team else 0.0,
+        "p2_lead_hp": float(p2_lead.get("base_hp", 0)),
+        "p2_lead_spe": float(p2_lead.get("base_spe", 0)),
+    }
 
 
 def extract_team_features(battle: Dict[str, Any]) -> Dict[str, float]:
@@ -193,6 +208,36 @@ def extract_team_features(battle: Dict[str, Any]) -> Dict[str, float]:
     feats["lead_outspeeds_p2"] = 1.0 if p1_lead_spe > feats["p2_lead_spe"] else (0.5 if p1_lead_spe == feats["p2_lead_spe"] else 0.0)
     feats["lead_bst_diff"] = p1_lead_bst - p2_lead_bst
     return feats
+
+
+def extract_simple_state_features(battle: Dict[str, Any]) -> Dict[str, float]:
+    """Minimal Turn-30 HP and faint aggregates used for the ablation baseline."""
+    tl = battle.get("battle_timeline", [])
+    p1_team = battle.get("p1_team_details", [])
+    p2_lead = battle.get("p2_lead_details") or {}
+    p1_hp = {p.get("name", f"u_{i}"): 1.0 for i, p in enumerate(p1_team)}
+    p2_hp = {p2_lead.get("name", "lead"): 1.0} if p2_lead else {}
+
+    for e in tl:
+        for side, hp_map in (("p1_pokemon_state", p1_hp), ("p2_pokemon_state", p2_hp)):
+            s = e.get(side) or {}
+            if s.get("name"):
+                hp_map[s["name"]] = 0.0 if s.get("status") == "fnt" else float(s.get("hp_pct", 1.0))
+
+    last_e = tl[-1] if tl else {}
+    s1, s2 = last_e.get("p1_pokemon_state") or {}, last_e.get("p2_pokemon_state") or {}
+    p1_total = float(sum(p1_hp.values()))
+    p2_total = float(sum(p2_hp.values()) + max(0, 6 - len(p2_hp)))
+    return {
+        "simple_p1_active_hp": 0.0 if s1.get("status") == "fnt" else float(s1.get("hp_pct", 1.0)),
+        "simple_p2_active_hp": 0.0 if s2.get("status") == "fnt" else float(s2.get("hp_pct", 1.0)),
+        "simple_p1_fainted_cnt": float(sum(1 for v in p1_hp.values() if v <= 0.0)),
+        "simple_p2_fainted_exp_cnt": float(sum(1 for v in p2_hp.values() if v <= 0.0)),
+        "simple_p2_revealed_cnt": float(len(p2_hp)),
+        "simple_p1_total_hp": p1_total,
+        "simple_p2_total_hp_raw": p2_total,
+        "simple_hp_diff_raw": p1_total - p2_total,
+    }
 
 
 def reconstruct_battle_history(
