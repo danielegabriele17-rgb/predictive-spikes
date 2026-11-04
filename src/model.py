@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -228,6 +229,35 @@ def get_feature_importance_df(models: List[XGBClassifier], feature_names: List[s
         )
         .sort_values("importance", ascending=False)
         .reset_index(drop=True)
+    )
+
+
+def get_default_model_configs(
+    config_path: Optional[str | Path] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Return the canonical 4 model definitions and ensemble configuration.
+
+    Loads from `configs/experiments.yaml` if available, falling back to local paths.
+    """
+    import yaml
+
+    candidates: List[Path] = []
+    if config_path is not None:
+        candidates.append(Path(config_path))
+    repo_root = Path(__file__).resolve().parent.parent
+    candidates.append(repo_root / "configs" / "experiments.yaml")
+    candidates.append(Path.cwd() / "configs" / "experiments.yaml")
+
+    for cand in candidates:
+        if cand.exists():
+            with open(cand, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f)
+                if "models" in cfg and "ensemble" in cfg:
+                    return cfg["models"], cfg["ensemble"]
+
+    raise FileNotFoundError(
+        "Could not locate models/ensemble configuration in experiments.yaml. "
+        "Please provide an explicit config_path or ensure configs/experiments.yaml is present."
     )
 
 
