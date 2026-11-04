@@ -253,7 +253,7 @@ The table below traces the exact data structures, types, shapes, and invariants 
 
 ## 5. Complete Notebook Execution Walkthrough (`notebooks/kaggle_submission.ipynb`)
 
-[`notebooks/kaggle_submission.ipynb`](file:///Users/Daniele/Documents/GitHub/predictive-spikes/notebooks/kaggle_submission.ipynb) contains exactly **17 cells** (9 Markdown cells and 8 Code cells) (`[VERIFIED]`). Following the architectural update (`commit 6b26e00`), the notebook directly embeds all 4 model hyperparameter configurations, decision thresholds, and ensemble blending options in executable Python code, eliminating hard dependencies on external YAML files during interactive tuning while reading default feature subsets via `get_default_feature_subsets()`.
+[`notebooks/kaggle_submission.ipynb`](file:///Users/Daniele/Documents/GitHub/predictive-spikes/notebooks/kaggle_submission.ipynb) contains exactly **19 cells** (9 Markdown cells and 8 Code cells) (`[VERIFIED]`). Following the architectural update (`commit 6b26e00`), the notebook directly embeds all 4 model hyperparameter configurations, decision thresholds, and ensemble blending options in executable Python code, eliminating hard dependencies on external YAML files during interactive tuning while reading default feature subsets via `get_default_feature_subsets()`.
 
 ### 5.1 Summary Table of All 15 Notebook Cells
 
