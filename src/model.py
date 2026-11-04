@@ -66,7 +66,7 @@ def run_xgb_cv(
     ] = None,
     threshold: float = 0.5,
     seed: int = 42,
-    es_holdout_frac: float = 0.2,
+    es_holdout_frac: float = 0.1,
 ) -> Tuple[CVResult, Optional[np.ndarray]]:
     """Run stratified cross-validation with XGBoost and optional within-fold feature extraction.
 

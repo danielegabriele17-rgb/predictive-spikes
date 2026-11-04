@@ -152,7 +152,7 @@ predictive-spikes/
 │   ├── type_chart_gen2.csv                   # 110 Gen 2 type matchup pairs (2,251 bytes)
 │   └── sample_submission.csv                 # 5,000 test battle_ids + header (58,899 bytes)
 ├── notebooks/
-│   ├── kaggle_submission.ipynb               # Self-contained 15-cell Kaggle execution notebook
+│   ├── kaggle_submission.ipynb               # Self-contained 17-cell Kaggle execution notebook
 │   └── submission.csv                        # Validated Kaggle submission output
 ├── outputs/
 │   └── submission.csv                        # Replicated ensemble submission output
@@ -225,7 +225,7 @@ flowchart TD
 The codebase is structured so that **100% of mathematical, feature extraction, cross-validation, weight optimization, and submission validation logic lives inside `src/`**, while `scripts/` and `notebooks/` act strictly as streamlined execution entry points (`[VERIFIED]`):
 - **Codebase Streamlining (`commit a04a31e`)**: In accordance with software engineering production hygiene, offline ablation drivers (`scripts/evaluate.py`, `scripts/train.py`) and intermediate modules (`src/model.py`) were eliminated once hyperparameter tuning and feature selection were completed. The repository now exclusively retains the production pipeline code required for generating the validated `submission.csv`.
 - [`scripts/generate_submission.py`](file:///Users/Daniele/Documents/GitHub/predictive-spikes/scripts/generate_submission.py): Deterministic standalone command-line entry point that builds the feature matrices, loads configuration presets via `get_default_feature_subsets()`, trains the 4 diverse XGBoost model families across 5-fold Stratified CV, optimizes blending weights via robust SLSQP with diversity floor and shrinkage, and writes the validated `submission.csv`.
-- [`notebooks/kaggle_submission.ipynb`](file:///Users/Daniele/Documents/GitHub/predictive-spikes/notebooks/kaggle_submission.ipynb): Interactive, self-contained 15-cell Kaggle execution notebook. If executed in a fresh Kaggle environment, it clones the repository into `/tmp/predictive-spikes` (preventing `/kaggle/working/` pollution), loads configurations directly in Python (allowing rapid experimentation with tree depth, shrinkage, or thresholds), trains the 20 estimators, computes multi-metric Booster feature importances, and writes a single contract-validated `submission.csv` file.
+- [`notebooks/kaggle_submission.ipynb`](file:///Users/Daniele/Documents/GitHub/predictive-spikes/notebooks/kaggle_submission.ipynb): Interactive, self-contained 17-cell Kaggle execution notebook. If executed in a fresh Kaggle environment, it clones the repository into `/tmp/predictive-spikes` (preventing `/kaggle/working/` pollution), loads configurations directly in Python (allowing rapid experimentation with tree depth, shrinkage, or thresholds), trains the 20 estimators, computes multi-metric Booster feature importances, and writes a single contract-validated `submission.csv` file.
 
 ---
 
@@ -253,7 +253,7 @@ The table below traces the exact data structures, types, shapes, and invariants 
 
 ## 5. Complete Notebook Execution Walkthrough (`notebooks/kaggle_submission.ipynb`)
 
-[`notebooks/kaggle_submission.ipynb`](file:///Users/Daniele/Documents/GitHub/predictive-spikes/notebooks/kaggle_submission.ipynb) contains exactly **15 cells** (8 Markdown cells and 7 Code cells) (`[VERIFIED]`). Following the architectural update (`commit 6b26e00`), the notebook directly embeds all 4 model hyperparameter configurations, decision thresholds, and ensemble blending options in executable Python code, eliminating hard dependencies on external YAML files during interactive tuning while reading default feature subsets via `get_default_feature_subsets()`.
+[`notebooks/kaggle_submission.ipynb`](file:///Users/Daniele/Documents/GitHub/predictive-spikes/notebooks/kaggle_submission.ipynb) contains exactly **17 cells** (9 Markdown cells and 8 Code cells) (`[VERIFIED]`). Following the architectural update (`commit 6b26e00`), the notebook directly embeds all 4 model hyperparameter configurations, decision thresholds, and ensemble blending options in executable Python code, eliminating hard dependencies on external YAML files during interactive tuning while reading default feature subsets via `get_default_feature_subsets()`.
 
 ### 5.1 Summary Table of All 15 Notebook Cells
 
@@ -274,6 +274,8 @@ The table below traces the exact data structures, types, shapes, and invariants 
 | **12** | Code | `[6]` | — | Train the 4 XGBoost models across 5 folds (20 estimators), optimize ensemble weights via bounded SLSQP + shrinkage, blend probabilities | `train_battles`, `y`, `test_battles`, `models_cfg`, `ens_cfg` | `cv_splits`, `te_folds_train`, `te_folds_val`, `te_folds_test`, `cv_results_map`, `oof_map`, `test_map`, `weights`, `blended_oof_probs`, `blended_test_probs` | `~52s` |
 | **13** | Markdown | — | `2413b02d` | Step 10: Rationale for Single Submission & Diagnostic Feature Importance | — | — | — |
 | **14** | Code | `[7]` | `9a7ec014` | Extract top-25 feature importances via native Booster scores and export validated `submission.csv` | `cv_results_map`, `test_ids`, `blended_test_probs`, `DECISION_THRESHOLD` | `fi_df`, `sub_df` | `~0.3s` |
+| **15** | Markdown | — | `e2a1b49f` | Step 11: Evaluation and Sanity Check of Submission Predictions against `test.jsonl` | — | — | — |
+| **16** | Code | `[8]` | `7b8c3d12` | Cross-evaluate `submission.csv` predictions against `test.jsonl` telemetry, HP differentials, probability entropy, and domain consistency | `test_battles`, `test_ids`, `submission_df`, `blended_test_probs`, `X_test_full` | `test_has_target`, `df_eval`, `corr_hp`, `corr_mat` | `~0.4s` |
 
 ### 5.2 Detailed Code Cell Walkthrough
 
