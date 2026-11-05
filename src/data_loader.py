@@ -31,7 +31,8 @@ def discover_data_dir(custom_dir: Optional[str | Path] = None) -> Path:
     Searches in order:
     1. Explicit `custom_dir` argument or `POKEMON_DATA_DIR` environment variable.
     2. Local repository `fds-pokemon-battles-prediction-2026` directory.
-    3. `/kaggle/input` recursive search (works regardless of Kaggle slug mounting).
+    3. Common Kaggle input mount paths.
+    4. Comprehensive search across `/kaggle/input` and `../input`.
     """
     candidates: List[Path] = []
 
@@ -46,21 +47,55 @@ def discover_data_dir(custom_dir: Optional[str | Path] = None) -> Path:
     candidates.append(repo_root / "fds-pokemon-battles-prediction-2026")
     candidates.append(Path.cwd() / "fds-pokemon-battles-prediction-2026")
 
+    # Known Kaggle competition mounting paths
+    candidates.extend([
+        Path("/kaggle/input/competitions/fds-pokemon-battles-prediction-2026"),
+        Path("/kaggle/input/fds-pokemon-battles-prediction-2026"),
+        Path("/kaggle/input/pokemon-battles-prediction-2026"),
+        Path("../input/competitions/fds-pokemon-battles-prediction-2026"),
+        Path("../input/fds-pokemon-battles-prediction-2026"),
+    ])
+
     # Return the first candidate directory that contains the training set
     for cand in candidates:
-        if cand.is_dir() and (cand / "train.jsonl").is_file():
-            return cand.resolve()
+        try:
+            if cand.is_dir() and (cand / "train.jsonl").is_file():
+                return cand.resolve()
+        except Exception:
+            pass
 
-    # Fallback: recursively scan Kaggle's input directory
-    kaggle_input = Path("/kaggle/input")
-    if kaggle_input.is_dir():
-        for match in kaggle_input.rglob("train.jsonl"):
-            if match.is_file():
-                return match.parent.resolve()
+    # Fallback: scan Kaggle's input directories using os.walk
+    for search_root in [Path("/kaggle/input"), Path("../input"), Path("../../input")]:
+        if search_root.is_dir():
+            try:
+                for root, dirs, files in os.walk(str(search_root), followlinks=True):
+                    if "train.jsonl" in files and "sample_submission.csv" in files:
+                        return Path(root).resolve()
+            except Exception:
+                pass
+
+            # In case sample_submission is in a different subdir, find any dir with train.jsonl
+            try:
+                for root, dirs, files in os.walk(str(search_root), followlinks=True):
+                    if "train.jsonl" in files:
+                        return Path(root).resolve()
+            except Exception:
+                pass
+
+    checked_str = [str(c) for c in candidates]
+    input_listing = []
+    for test_dir in [Path("/kaggle/input"), Path("../input")]:
+        if test_dir.is_dir():
+            try:
+                input_listing.append(f"{test_dir}: {os.listdir(str(test_dir))}")
+            except Exception as e:
+                input_listing.append(f"{test_dir}: error {e}")
 
     raise FileNotFoundError(
-        "Could not locate competition data directory containing 'train.jsonl'. "
-        f"Checked candidates: {[str(c) for c in candidates]} and /kaggle/input."
+        "Could not locate competition data directory containing 'train.jsonl'.\\n"
+        f"Checked candidates: {checked_str}\\n"
+        f"Input directory contents: {input_listing}\\n"
+        "Please ensure the competition dataset is attached in the Kaggle notebook sidebar (Data -> Add Data)."
     )
 
 
