@@ -1,6 +1,6 @@
 random_seed: 42
 n_splits: 5
-default_threshold: 0.50
+default_threshold: 0.51
 feature_subsets:
   pruned_features:
   - temp_hp_adv_adj_t30
